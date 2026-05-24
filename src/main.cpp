@@ -4,53 +4,13 @@
 #include <algorithm>
 #include <vector>
 #include <cmath>
+#include <ctime>
 
-typedef long long ll;
+#include "Config.h"
+#include "World.h"
+#include "Physics.h"
 
-// константы для быстрой отладки.
-
-//  НАСТРОЙКИ МИРА  
-const int MAP_WIDTH = 200;      // ширина всей карты в блоках
-const int MAP_HEIGHT = 100;     // высота карты в блоках
-const int GROUND_LEVEL = 20;    // уровень поверхности (т.е травы)
-const float VISIBLE_HEIGHT = 14.0f; // сколько блоков помещается в экран по вертикали
-
-// Константы(пока) цвета фона
-const float SKY_R = 0.5f;
-const float SKY_G = 0.8f;
-const float SKY_B = 1.0f;
-
-//  ФИЗИКА ДВИЖЕНИЯ 
-const float PHYSICS_GRAVITY = 0.015f;      // сила притяжения (чем меньше, тем медленнее падение)
-const float PHYSICS_JUMP_POWER = 0.2f;     // высота прыжка
-const float PHYSICS_WALK_SPEED = 0.12f;      // максимальная скорость ходьбы
-const float PHYSICS_ACCEL = 0.008f;          // ускорение (плавность разгона)
-const float PHYSICS_FRICTION = 6.0f;       // трение (плавность остановки)
-
-// Типы блоков
-enum BlockType { AIR = 0, GRASS = 1, DIRT = 2, STONE = 3, WOOD = 4, LEAVES = 5 };
-
-// Двухслойная карта: [0] - задний слой, [1] - передний слой (игрок ходит здесь)
-int worldMap[2][MAP_HEIGHT][MAP_WIDTH] = { 0 };
-
-// Структура игрока
-struct Player {
-    float x, y;             // Позиция центра персонажа
-    float velX, velY;       // Текущая скорость по осям
-    float width = 0.6f;     // Ширина хитбокса
-    float height = 1.8f;    // Высота хитбокса
-    bool isOnGround;        // Флаг: стоит ли персонаж на земле
-    Player() : x(20.0f), y(25.0f), velX(0), velY(0), isOnGround(false) {}
-};
-
-Player player;
-float cameraX = 0.0f;       // Позиция камеры по X
-float cameraY = 0.0f;       // Позиция камеры по Y
-
-// Флаг для отслеживания клика мыши (чтобы ломать один блок за один клик)
-bool mousePressedLastFrame = false;
-
-//  Переделала шейдеры... (комменты для меня надо)
+// Шейдеры
 const char* vertexShaderSource = "#version 460 core\n" // так. это - верся языка шейдеров...
 "layout (location = 0) in vec2 aPos;\n" // вершины блока
 "layout (location = 1) in vec2 instanceOffset;\n" // где блок находится
@@ -70,194 +30,43 @@ const char* fragmentShaderSource = "#version 460 core\n" // эта штука к
 "   FragColor = vec4(blockColor, 1.0f);\n"
 "}\n\0";
 
+// Для инвентаря (UI)
+float lastBorderScaleX = 0.0f;
+float lastStartUiX = 0.0f;
+float lastSlotStepX = 0.0f;
+float lastBorderScaleY = 0.0f;
+float lastUiY = -0.85f;
+
+
 // Технические штуки.
+// Изменене размеров окна
 void glfwWindowSizeCallback(GLFWwindow* window, int width, int height) {
     glViewport(0, 0, width, height);
 }
 
+// Колёсико мыши для быстрой смены слотов инвентаря
+void glfwScrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
+    if (yoffset > 0) {
+        selectedSlot = (selectedSlot - 1 + 9) % 9;
+    }
+    else if (yoffset < 0) {
+        selectedSlot = (selectedSlot + 1) % 9;
+    }
+}
+
+// Клавиши (Esc и цифры 1-9)
 void glfwKeyCallback(GLFWwindow* window, int key, int scancode, int action, int mode) {
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
         glfwSetWindowShouldClose(window, GL_TRUE);
     }
-}
-
-//  ГЕНЕРАЦИЯ ОБЪЕКТОВ
-// Создание дерева в указанных координатах (деревья спавнятся на заднем слое [0])
-void addTree(int x, int y) {
-    if (x < 2 || x >= MAP_WIDTH - 2 || y >= MAP_HEIGHT - 6) return;
-    for (int i = 1; i <= 5; i++) worldMap[0][y + i][x] = WOOD; // Ствол 
-    int leafBase = y + 3;
-    for (int ly = 0; ly <= 1; ly++) { // Листва сзади
-        for (int lx = -2; lx <= 2; lx++) {
-            if (worldMap[0][leafBase + ly][x + lx] == AIR) worldMap[0][leafBase + ly][x + lx] = LEAVES;
-        }
-    }for (int ly = 2; ly <= 3; ly++) {
-        for (int lx = -1; lx <= 1; lx++) {
-            if (worldMap[0][leafBase + ly][x + lx] == AIR) worldMap[0][leafBase + ly][x + lx] = LEAVES;
-        }
-    }
-    for (int ly = 0; ly <= 1; ly++) { // спереди
-        for (int lx = -2; lx <= 2; lx++) {
-            worldMap[1][leafBase + ly][x + lx] = LEAVES;
-        }
-    }for (int ly = 2; ly <= 3; ly++) {
-        for (int lx = -1; lx <= 1; lx++) {
-            worldMap[1][leafBase + ly][x + lx] = LEAVES;
-        }
+    if (action == GLFW_PRESS && key >= GLFW_KEY_1 && key <= GLFW_KEY_9) {
+        selectedSlot = key - GLFW_KEY_1;
     }
 }
 
-// Заполнение карты начальными блоками
-void generateWorld() {
-    for (int x = 0; x < MAP_WIDTH; x++) {
-        for (int y = 0; y < MAP_HEIGHT; y++) {
-            // Передний слой [1]
-            if (y > GROUND_LEVEL) worldMap[1][y][x] = AIR;
-            else if (y == GROUND_LEVEL) worldMap[1][y][x] = GRASS;
-            else if (y < GROUND_LEVEL && y >= GROUND_LEVEL - 3) worldMap[1][y][x] = DIRT;
-            else worldMap[1][y][x] = STONE;
-
-            // Задний слой [0]
-            if (y > GROUND_LEVEL) worldMap[0][y][x] = AIR;
-            else if (y == GROUND_LEVEL) worldMap[0][y][x] = GRASS;
-            else if (y < GROUND_LEVEL && y >= GROUND_LEVEL - 3) worldMap[0][y][x] = DIRT;
-            else if (y < GROUND_LEVEL - 3) worldMap[0][y][x] = STONE;
-            else worldMap[0][y][x] = AIR;
-        }
-    }
-    for (int x = 10; x < MAP_WIDTH; x += 15) addTree(x, GROUND_LEVEL);
-}
-
-//  ФИЗИКА И УПРАВЛЕНИЕ
-void updatePhysics(GLFWwindow* window, float dt) {
-    if (dt > 0.1f) dt = 0.1f;
-
-    // Рассчитываем множитель шага на основе deltaTime (базовое значение берем за 60 FPS, т.е. шаг где-то 0.016с)
-    float dtMultiplier = dt / 0.016666f;
-
-    // Обработка клавиш движения (A и D) с учетом ускорения
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
-        player.velX -= PHYSICS_ACCEL * dtMultiplier;
-        if (player.velX < -PHYSICS_WALK_SPEED) player.velX = -PHYSICS_WALK_SPEED;
-    }
-    else if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
-        player.velX += PHYSICS_ACCEL * dtMultiplier;
-        if (player.velX > PHYSICS_WALK_SPEED) player.velX = PHYSICS_WALK_SPEED;
-    }
-    else {
-        // Эффект трения при остановке
-        if (player.velX > 0) {
-            player.velX -= PHYSICS_FRICTION * dt;
-            if (player.velX < 0) player.velX = 0;
-        }
-        else if (player.velX < 0) {
-            player.velX += PHYSICS_FRICTION * dt;
-            if (player.velX > 0) player.velX = 0;
-        }
-    }
-
-    // Обработка прыжка (Пробел)
-    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && player.isOnGround) {
-        player.velY = PHYSICS_JUMP_POWER;
-        player.isOnGround = false;
-    }
-    // (W)
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS && player.isOnGround) {
-        player.velY = PHYSICS_JUMP_POWER;
-        player.isOnGround = false;
-    }
-
-    // Применение гравитации и обновление координат
-    player.velY -= PHYSICS_GRAVITY * dtMultiplier;
-    player.y += player.velY * dtMultiplier;
-    player.x += player.velX * dtMultiplier;
-
-    // Закрываем окно игры, если игрок выпал за нижнюю границу карты в минус
-    if (player.y < 0.0f) {
-        glfwSetWindowShouldClose(window, GL_TRUE);
-        return;
-    }
-
-    // --- КОЛЛИЗИЯ С ПОТОЛКОМ (стукаемся головой) ---
-    if (player.velY > 0) {
-        float headY = player.y + (player.height / 2.0f);
-        int checkYHeadCeil = (int)std::floor(headY + 0.5f);
-
-        int checkXHead1 = (int)std::floor(player.x - (player.width / 2.0f) + 0.05f + 0.5f);
-        int checkXHead2 = (int)std::floor(player.x + (player.width / 2.0f) - 0.05f + 0.5f);
-
-        if (checkYHeadCeil >= 0 && checkYHeadCeil < MAP_HEIGHT) {
-            bool blockAboveLeft = (checkXHead1 >= 0 && checkXHead1 < MAP_WIDTH) && (worldMap[1][checkYHeadCeil][checkXHead1] != AIR);
-            bool blockAboveRight = (checkXHead2 >= 0 && checkXHead2 < MAP_WIDTH) && (worldMap[1][checkYHeadCeil][checkXHead2] != AIR);
-
-            if (blockAboveLeft || blockAboveRight) {
-                float blockBottom = (float)checkYHeadCeil - 0.5f;
-                player.y = blockBottom - (player.height / 2.0f);
-                player.velY = 0;
-            }
-        }
-    }
-
-    // Норм коллизия, УРА
-    // Проверяем две точки по высоте хитбокса: район ног и район головы
-    float checkYFeet = player.y - player.height / 2.0f + 0.1f;
-    float checkYHead = player.y + player.height / 2.0f - 0.1f;
-    int tileYFeet = (int)std::floor(checkYFeet + 0.5f);
-    int tileYHead = (int)std::floor(checkYHead + 0.5f);
-
-    // Коллизия при движении вправо
-    if (player.velX > 0) {
-        float rightEdge = player.x + player.width / 2.0f;
-        int tileX = (int)std::floor(rightEdge + 0.5f);
-        if (tileX >= 0 && tileX < MAP_WIDTH) {
-            bool wallFeet = (tileYFeet >= 0 && tileYFeet < MAP_HEIGHT) && (worldMap[1][tileYFeet][tileX] != AIR);
-            bool wallHead = (tileYHead >= 0 && tileYHead < MAP_HEIGHT) && (worldMap[1][tileYHead][tileX] != AIR);
-            if (wallFeet || wallHead) {
-                player.x = (float)tileX - 0.5f - player.width / 2.0f;
-                player.velX = 0;
-            }
-        }
-    }
-    // Коллизия при движении влево
-    else if (player.velX < 0) {
-        float leftEdge = player.x - player.width / 2.0f;
-        int tileX = (int)std::floor(leftEdge + 0.5f);
-        if (tileX >= 0 && tileX < MAP_WIDTH) {
-            bool wallFeet = (tileYFeet >= 0 && tileYFeet < MAP_HEIGHT) && (worldMap[1][tileYFeet][tileX] != AIR);
-            bool wallHead = (tileYHead >= 0 && tileYHead < MAP_HEIGHT) && (worldMap[1][tileYHead][tileX] != AIR);
-            if (wallFeet || wallHead) {
-                player.x = (float)tileX + 0.5f + player.width / 2.0f;
-                player.velX = 0;
-            }
-        }
-    }
-    player.isOnGround = false;
-    float footY = player.y - (player.height / 2.0f);
-    int checkY = (int)std::floor(footY + 0.5f);
-
-    // Сушаем область проверки под ногами на 0.05f с каждой стороны,
-    // чтобы игрок не считал стены под собой полом, когда трется об них вплотную
-    int checkX1 = (int)std::floor(player.x - (player.width / 2.0f) + 0.05f + 0.5f);
-    int checkX2 = (int)std::floor(player.x + (player.width / 2.0f) - 0.05f + 0.5f);
-
-    if (checkY >= 0 && checkY < MAP_HEIGHT) {
-        bool blockUnderLeft = (checkX1 >= 0 && checkX1 < MAP_WIDTH) && (worldMap[1][checkY][checkX1] != AIR);
-        bool blockUnderRight = (checkX2 >= 0 && checkX2 < MAP_WIDTH) && (worldMap[1][checkY][checkX2] != AIR);
-
-        if (blockUnderLeft || blockUnderRight) {
-            float blockTop = (float)checkY + 0.5f;
-            // Если игрок опустился ниже верхушки блока — ставим его на блок
-            if (footY <= blockTop && player.velY <= 0) {
-                player.y = blockTop + (player.height / 2.0f);
-                player.velY = 0;
-                player.isOnGround = true;
-            }
-        }
-    }
-
-    // Обработка клика ЛКМ для разрушения блоков
-    int mouseState = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
-    if (mouseState == GLFW_PRESS && !mousePressedLastFrame) {
+// ЛКМ для выбора ячейки инвентаря на экране
+void glfwMouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
         double mouseX, mouseY;
         glfwGetCursorPos(window, &mouseX, &mouseY);
 
@@ -265,97 +74,88 @@ void updatePhysics(GLFWwindow* window, float dt) {
         glfwGetWindowSize(window, &w, &h);
         float aspect = (float)w / (float)h;
 
-        // Перевод экранных пикселей в нормализованные координаты OpenGL (-1.0 до 1.0)
-        float normX = (2.0f * (float)mouseX) / w - 1.0f;
-        float normY = 1.0f - (2.0f * (float)mouseY) / h; // Инвертируем Y, так как в OpenGL он идет снизу вверх...
+        // Переводим пиксельные координаты экрана в координаты от -1.0f до 1.0f
+        float ndcX = (2.0f * (float)mouseX) / (float)w - 1.0f;
+        float ndcY = 1.0f - (2.0f * (float)mouseY) / (float)h;
 
-        // Перевод координат OpenGL в игровые координаты мира с учетом камеры и масштаба...
-        float worldMouseX = (normX * aspect * VISIBLE_HEIGHT / 2.0f) + cameraX;
-        float worldMouseY = (normY * VISIBLE_HEIGHT / 2.0f) + cameraY;
+        // Проверяем, попал ли клик по высоте инвентаря
+        float halfHeight = lastBorderScaleY / 2.0f;
+        if (ndcY >= (lastUiY - halfHeight) && ndcY <= (lastUiY + halfHeight)) {
 
-        // Точные координаты блока, на который НАЖАЛИ
-        int targetX = (int)std::floor(worldMouseX + 0.5f);
-        int targetY = (int)std::floor(worldMouseY + 0.5f);
+            // Проверяем каждый из 9 слотов
+            for (int i = 0; i < 9; i++) {
+                float slotCenterX = lastStartUiX + i * lastSlotStepX;
 
-        if (targetX >= 0 && targetX < MAP_WIDTH && targetY >= 0 && targetY < MAP_HEIGHT) {
+                float leftEdge = (slotCenterX - (lastBorderScaleX / 2.0f)) / aspect;
+                float rightEdge = (slotCenterX + (lastBorderScaleX / 2.0f)) / aspect;
 
-            // Динамически определяем лимит дистанции: если передний блок пустой, значит целимся в задний (радиус 4), иначе в передний (радиус 5)
-            float maxBreakDistance = 5.0f;
-            if (worldMap[1][targetY][targetX] == AIR && worldMap[0][targetY][targetX] != AIR) {
-                maxBreakDistance = 4.0f;
-            }
-
-            // Расчет позиции СЕРЕДИНЫ головы игрока (чуть ниже макушки)
-            float headX = player.x;
-            float headY = player.y + (player.height / 2.0f) - 0.2f;
-
-            // Вектор от головы до КУРСОРA МЫШИ для проверки радиуса действия
-            float dirMouseX = worldMouseX - headX;
-            float dirMouseY = worldMouseY - headY;
-            float distanceToMouse = std::sqrt(dirMouseX * dirMouseX + dirMouseY * dirMouseY);
-
-            if (distanceToMouse <= maxBreakDistance) {
-
-                // Теперь пускаем луч строго в ЦЕНТР целевого блока, чтобы не было случайных зацепов соседних блоков
-                float targetCenterX = (float)targetX;
-                float targetCenterY = (float)targetY;
-
-                float dirX = targetCenterX - headX;
-                float dirY = targetCenterY - headY;
-                float distanceToCenter = std::sqrt(dirX * dirX + dirY * dirY);
-
-                bool hitWall = false;
-
-                if (distanceToCenter > 0.0f) {
-                    float stepX = dirX / distanceToCenter;
-                    float stepY = dirY / distanceToCenter;
-
-                    float currentLen = 0.0f;
-                    float stepDist = 0.05f; // Длина одного микро-шага луча для точности
-
-                    // Шагаем лучом от головы, но ОСТАНАВЛИВАЕМСЯ чуть-чуть не доходя до центра целевого блока
-                    // (минус 0.4f, чтобы не проверять сам целевой блок на роль "преграды")
-                    float maxCheckLen = distanceToCenter - 0.4f;
-
-                    while (currentLen < maxCheckLen) {
-                        float checkX = headX + stepX * currentLen;
-                        float checkY_ray = headY + stepY * currentLen;
-
-                        int bX = (int)std::floor(checkX + 0.5f);
-                        int bY = (int)std::floor(checkY_ray + 0.5f);
-
-                        if (bX >= 0 && bX < MAP_WIDTH && bY >= 0 && bY < MAP_HEIGHT) {
-                            // Если на пути к цели встретили ДРУГОЙ твердый блок переднего слоя — это преграда
-                            if ((bX != targetX || bY != targetY) && worldMap[1][bY][bX] != AIR) {
-                                hitWall = true;
-                                break;
-                            }
-                        }
-                        currentLen += stepDist;
-                    }
-                }
-
-                // Если преград на пути нет — сносим именно тот блок, на который ткнули
-                if (!hitWall) {
-                    if (worldMap[1][targetY][targetX] != AIR) {
-                        worldMap[1][targetY][targetX] = AIR; // Ломаем передний план
-                    }
-                    else if (worldMap[0][targetY][targetX] != AIR) {
-                        worldMap[0][targetY][targetX] = AIR; // Если передний пуст, ломаем задний
-                    }
+                if (ndcX >= leftEdge && ndcX <= rightEdge) {
+                    selectedSlot = i; // Активируем выбранный слот
+                    return; // Выходим, чтобы клик не улетел в игровой мир
                 }
             }
         }
     }
-    mousePressedLastFrame = (mouseState == GLFW_PRESS);
+}
 
-    // Плавное следование камеры за персонажем (не зависит от частоты кадров)
-    float cameraSmoothing = 1.0f - std::pow(0.1f, dt * 5.0f);
-    cameraX += (player.x - cameraX) * cameraSmoothing;
-    cameraY += (player.y - cameraY) * cameraSmoothing;
+// Матрицы пиксельных цифр 3x5 для количества предметов
+const int font3x5[10][5] = {
+    {0b111, 0b101, 0b101, 0b101, 0b111}, // 0
+    {0b010, 0b110, 0b010, 0b010, 0b111}, // 1
+    {0b111, 0b001, 0b111, 0b100, 0b111}, // 2
+    {0b111, 0b001, 0b111, 0b001, 0b111}, // 3
+    {0b101, 0b101, 0b111, 0b001, 0b001}, // 4
+    {0b111, 0b100, 0b111, 0b001, 0b111}, // 5
+    {0b111, 0b100, 0b111, 0b101, 0b111}, // 6
+    {0b111, 0b001, 0b010, 0b010, 0b010}, // 7
+    {0b111, 0b101, 0b111, 0b101, 0b111}, // 8
+    {0b111, 0b101, 0b111, 0b001, 0b111}  // 9
+};
+
+// Рендеринг одной цифры шрифтом 3x5 (масштаб х3 пикселя)
+void drawPixelDigit(int digit, float startPixelX, float startPixelY, float pixelSizeX, float pixelSizeY, int scaleLoc, float aspect) {
+    if (digit < 0 || digit > 9) return;
+
+    glUniform2f(scaleLoc, pixelSizeX * 3.0f * aspect, pixelSizeY * 3.0f);
+    float whiteColor[] = { 1.0f, 1.0f, 1.0f };
+    glVertexAttrib3fv(2, whiteColor);
+
+    for (int row = 0; row < 5; row++) {
+        int rowBits = font3x5[digit][row];
+        for (int col = 0; col < 3; col++) {
+            if ((rowBits >> (2 - col)) & 1) {
+                float px = startPixelX + (col * 3.0f + 1.5f) * pixelSizeX * aspect;
+                float py = startPixelY - (row * 3.0f + 1.5f) * pixelSizeY;
+
+                float digitOffset[] = { px, py };
+                glVertexAttrib2fv(1, digitOffset);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+            }
+        }
+    }
+}
+
+// Рисует кол-во блоков в ячейке
+void drawPixelNumber(int number, float cellRightX, float cellBottomY, int screenW, int screenH, int scaleLoc, float aspect) {
+    float pixelSizeX = 2.0f / (float)screenW;
+    float pixelSizeY = 2.0f / (float)screenH;
+
+    float endX = cellRightX - 5.0f * pixelSizeX * aspect;
+    float startY = cellBottomY + 17.0f * pixelSizeY;
+
+    if (number >= 10) {
+        int d1 = number / 10;
+        int d2 = number % 10;
+        drawPixelDigit(d2, endX - 3.0f * pixelSizeX * 3.0f * aspect, startY, pixelSizeX, pixelSizeY, scaleLoc, aspect);
+        drawPixelDigit(d1, endX - 7.0f * pixelSizeX * 3.0f * aspect, startY, pixelSizeX, pixelSizeY, scaleLoc, aspect);
+    }
+    else {
+        drawPixelDigit(number, endX - 3.0f * pixelSizeX * 3.0f * aspect, startY, pixelSizeX, pixelSizeY, scaleLoc, aspect);
+    }
 }
 
 int main() {
+    srand((unsigned int)time(NULL));
     // Инициализация графического окна
     if (!glfwInit()) {
         std::cerr << "Can't load GLFW." << std::endl;
@@ -375,6 +175,8 @@ int main() {
 
     glfwSetWindowSizeCallback(window, glfwWindowSizeCallback);
     glfwSetKeyCallback(window, glfwKeyCallback);
+    glfwSetScrollCallback(window, glfwScrollCallback);
+    glfwSetMouseButtonCallback(window, glfwMouseButtonCallback);
     glfwMakeContextCurrent(window);
 
     if (!gladLoadGL()) {
@@ -390,7 +192,7 @@ int main() {
     glfwSwapInterval(1); // врубаю V-sync
     generateWorld();
 
-    // Компиляция и сборка шейдерной программы
+    // Сборка шейдеров
     unsigned int vs = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vs, 1, &vertexShaderSource, NULL);
     glCompileShader(vs);
@@ -422,12 +224,12 @@ int main() {
     glBindBuffer(GL_ARRAY_BUFFER, instanceOffsetsVBO);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(1);
-    glVertexAttribDivisor(1, 1); // Менять значение 1 раз за каждый блок
+    glVertexAttribDivisor(1, 1);
 
     glBindBuffer(GL_ARRAY_BUFFER, instanceColorsVBO);
     glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(2);
-    glVertexAttribDivisor(2, 1); // Менять цвет 1 раз за каждый блок
+    glVertexAttribDivisor(2, 1);
 
     // Ужас.
     unsigned int playerVAO, playerVBO;
@@ -445,7 +247,7 @@ int main() {
     // Выделяю память под сборщик видимых блоков заранее
     std::vector<float> activeOffsets;
     std::vector<float> activeColors;
-    activeOffsets.reserve(4000); // Резерв увеличен, так как теперь слоев два
+    activeOffsets.reserve(4000);
     activeColors.reserve(6000);
 
     float lastFrameTime = 0.0f;
@@ -460,7 +262,9 @@ int main() {
         glfwGetWindowSize(window, &w, &h);
         float aspect = (float)w / (float)h;
 
-        updatePhysics(window, deltaTime);
+        double currentMouseX, currentMouseY;
+        glfwGetCursorPos(window, &currentMouseX, &currentMouseY);
+        updatePhysics(window, deltaTime, currentMouseX, currentMouseY);
 
         // Рисуем небо
         glClearColor(SKY_R, SKY_G, SKY_B, 1.0f);
@@ -487,6 +291,7 @@ int main() {
         activeColors.clear();
 
         // Сначала собираем задний слой [0], чтобы он отрисовался позади игрока и передних блоков
+
         for (int layerIdx = 0; layerIdx <= 1; layerIdx++) {
             for (int y = startY; y < endY; y++) {
                 for (int x = startX; x < endX; x++) {
@@ -500,9 +305,9 @@ int main() {
                     // Базовый цвет блока
                     float r = 0.0f, g = 0.0f, b = 0.0f;
                     if (block == GRASS) { r = 0.2f;  g = 0.8f;  b = 0.2f; }
-                    else if (block == DIRT) { r = 0.5f;  g = 0.3f;  b = 0.1f; }
+                    else if (block == DIRT) { r = 0.45f;  g = 0.27f;  b = 0.08f; }
                     else if (block == STONE) { r = 0.4f;  g = 0.4f;  b = 0.42f; }
-                    else if (block == WOOD) { r = 0.4f;  g = 0.25f; b = 0.1f; }
+                    else if (block == WOOD) { r = 0.55f;  g = 0.37f; b = 0.15f; }
                     else if (block == LEAVES) { r = 0.1f;  g = 0.5f;  b = 0.1f; }
 
                     // Если это задний слой, смешиваем: 75% цвета блока + 25% цвета фона (неба)
@@ -519,37 +324,176 @@ int main() {
             }
         }
 
-        // ВОООТ ЭТО ВОТ ВСЁ - ОПТИМИЗАЦИЯ. 
-        int totalVisibleBlocks = activeOffsets.size() / 2;
+        int blocksCountInVbo = (int)(activeOffsets.size() / 2);
 
-        if (totalVisibleBlocks > 0) {
+        // Сбор данных о выпавшем луте (левитация)
+        for (const auto& item : droppedItems) {
+            float renderY = item.y;
+            if (item.isOnGround) {
+                renderY = item.groundY + 0.18f + std::sin(item.animTime) * 0.08f;
+            }
+            activeOffsets.push_back((item.x - cameraX) * sx);
+            activeOffsets.push_back((renderY - cameraY) * sy);
+
+            // цвет предмета
+            float r = 0.0f, g = 0.0f, b = 0.0f;
+            if (item.type == GRASS) { r = 0.2f; g = 0.8f; b = 0.2f; }
+            else if (item.type == DIRT) { r = 0.45f; g = 0.27f; b = 0.08f; }
+            else if (item.type == STONE) { r = 0.4f; g = 0.4f; b = 0.42f; }
+            else if (item.type == WOOD) { r = 0.55f; g = 0.37f; b = 0.15f; }
+            else if (item.type == LEAVES) { r = 0.1f; g = 0.5f; b = 0.1f; }
+            else if (item.type == APPLE) { r = 0.9f; g = 0.1f; b = 0.1f; }
+
+            activeColors.push_back(r);
+            activeColors.push_back(g);
+            activeColors.push_back(b);
+        }
+
+        int totalElementsInVbo = (int)(activeOffsets.size() / 2);
+
+        if (totalElementsInVbo > 0) {
             glBindVertexArray(VAO);
 
             glBindBuffer(GL_ARRAY_BUFFER, instanceOffsetsVBO);
-            glBufferData(GL_ARRAY_BUFFER, activeOffsets.size() * sizeof(float), activeOffsets.data(), GL_STREAM_DRAW);
+            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(activeOffsets.size() * sizeof(float)), activeOffsets.data(), GL_STREAM_DRAW);
 
             glBindBuffer(GL_ARRAY_BUFFER, instanceColorsVBO);
-            glBufferData(GL_ARRAY_BUFFER, activeColors.size() * sizeof(float), activeColors.data(), GL_STREAM_DRAW);
+            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(activeColors.size() * sizeof(float)), activeColors.data(), GL_STREAM_DRAW);
 
-            glDrawArraysInstanced(GL_TRIANGLES, 0, 6, totalVisibleBlocks);
+            // Отрисовка blocks
+            if (blocksCountInVbo > 0) {
+                glUniform2f(scaleLocation, sx, sy);
+                glDrawArraysInstanced(GL_TRIANGLES, 0, 6, blocksCountInVbo);
+            }
+
+            // Отрисовка выдавших предметов
+            if (!droppedItems.empty()) {
+                glUniform2f(scaleLocation, sx * 0.25f, sy * 0.25f);
+                glDrawArraysInstancedBaseInstance(GL_TRIANGLES, 0, 6, (GLsizei)droppedItems.size(), blocksCountInVbo);
+            }
         }
 
         // Рисуем игрока поверх заднего слоя блоков
         glBindVertexArray(playerVAO);
-
         float playerOffset[] = { (player.x - cameraX) * sx, (player.y - cameraY) * sy };
         float playerColor[] = { 1.0f, 0.3f, 0.3f };
 
         glUniform2f(scaleLocation, sx * player.width, sy * player.height);
-
         // это чтобы игрока как блок не считало и не применяло к нему цвета и смещение по его стандарту
         glDisableVertexAttribArray(1);
         glDisableVertexAttribArray(2);
         // наше передаем вместо этого
         glVertexAttrib2fv(1, playerOffset);
         glVertexAttrib3fv(2, playerColor);
-
         // рисуем двумя треугольниками
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        // Отрисовка инвентаря
+        glBindVertexArray(playerVAO);
+
+        float slotSizePixels = 56.0f;
+        float paddingPixels = 2.0f;
+        float borderSizePixels = slotSizePixels + paddingPixels * 2.0f;
+
+        lastBorderScaleX = borderSizePixels * (2.0f / (float)w) * aspect;
+        lastBorderScaleY = borderSizePixels * (2.0f / (float)h);
+        float slotScaleX = slotSizePixels * (2.0f / (float)w) * aspect;
+        float slotScaleY = slotSizePixels * (2.0f / (float)h);
+
+        glUniform1f(aspectLocation, aspect);
+
+        float totalInventoryWidthNDC = (9 * borderSizePixels + 8 * paddingPixels) * (2.0f / (float)w) * aspect;
+        lastStartUiX = (-totalInventoryWidthNDC / 2.0f + (borderSizePixels * (1.0f / (float)w)) * aspect);
+        lastSlotStepX = (borderSizePixels + paddingPixels) * (2.0f / (float)w) * aspect;
+
+        for (int i = 0; i < 9; i++) {
+            float slotX = lastStartUiX + i * lastSlotStepX;
+
+            // Обводка
+            glUniform2f(scaleLocation, lastBorderScaleX, lastBorderScaleY);
+            float borderOffset[] = { slotX, lastUiY };
+            float borderColor[] = { 0.65f, 0.65f, 0.65f };
+            glVertexAttrib2fv(1, borderOffset);
+            glVertexAttrib3fv(2, borderColor);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+
+            // Внутренний фон слота
+            glUniform2f(scaleLocation, slotScaleX, slotScaleY);
+            float selectedColor[] = { 0.6f, 0.6f, 0.6f };
+            float normalColor[] = { 0.45f, 0.45f, 0.45f };
+
+            if (i == selectedSlot) glVertexAttrib3fv(2, selectedColor);
+            else glVertexAttrib3fv(2, normalColor);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+
+            // Иконка предмета в слоте
+            if (inventory[i].type != AIR) {
+                glUniform2f(scaleLocation, slotScaleX * 0.52f, slotScaleY * 0.52f);
+                float itemR = 0.0f, itemG = 0.0f, itemB = 0.0f;
+                int type = inventory[i].type;
+                if (type == GRASS) { itemR = 0.2f; itemG = 0.8f; itemB = 0.2f; }
+                else if (type == DIRT) { itemR = 0.45f; itemG = 0.27f; itemB = 0.08f; }
+                else if (type == STONE) { itemR = 0.4f; itemG = 0.4f; itemB = 0.42f; }
+                else if (type == WOOD) { itemR = 0.55f; itemG = 0.37f; itemB = 0.15f; }
+                else if (type == LEAVES) { itemR = 0.1f; itemG = 0.5f; itemB = 0.1f; }
+                else if (type == APPLE) { itemR = 0.9f; itemG = 0.1f; itemB = 0.1f; }
+
+                float itemColor[] = { itemR, itemG, itemB };
+                glVertexAttrib3fv(2, itemColor);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+
+                // Вывод цифр количества
+                if (inventory[i].count > 1) {
+                    float rightEdgeNDC = slotX + (slotSizePixels / 2.0f) * (2.0f / (float)w) * aspect;
+                    float bottomEdgeNDC = lastUiY - (slotSizePixels / 2.0f) * (2.0f / (float)h);
+                    drawPixelNumber(inventory[i].count, rightEdgeNDC, bottomEdgeNDC, w, h, scaleLocation, aspect);
+                }
+            }
+        }
+
+        // Отрисовка крестика (временная наверн)=
+        float normX = (2.0f * (float)currentMouseX) / w - 1.0f;
+        float normY = 1.0f - (2.0f * (float)currentMouseY) / h;
+        float worldMouseX = (normX * aspect * VISIBLE_HEIGHT / 2.0f) + cameraX;
+        float worldMouseY = (normY * VISIBLE_HEIGHT / 2.0f) + cameraY;
+        int targetX = (int)std::floor(worldMouseX + 0.5f);
+        int targetY = (int)std::floor(worldMouseY + 0.5f);
+        
+        bool shiftPressed = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+        int layerToPlace = shiftPressed ? 0 : 1;
+        bool dummyBuildingUnderSelf = false;
+
+        // выбор цвета курсора
+        bool canBuild = canPlaceBlock(targetX, targetY, layerToPlace, dummyBuildingUnderSelf);
+
+        glBindVertexArray(playerVAO);
+        glUniform1f(aspectLocation, aspect);
+        if (canBuild) {
+            float greenColor[] = { 0.0f, 1.0f, 0.0f };
+            glVertexAttrib3fv(2, greenColor);
+        }
+        else {
+            float whiteColor[] = { 1.0f, 1.0f, 1.0f };
+            glVertexAttrib3fv(2, whiteColor);
+        }
+
+        // Перевод коорд
+        float mouseNdcX = (2.0f * (float)currentMouseX) / (float)w - 1.0f;
+        float mouseNdcY = 1.0f - (2.0f * (float)currentMouseY) / (float)h;
+
+        float crosshairOffset[] = { mouseNdcX * aspect, mouseNdcY };
+        glVertexAttrib2fv(1, crosshairOffset);
+
+        // Горизонтальная линия крестика
+        float thicknessX = 4.0f / (float)w;
+        float lengthX = 30.0f / (float)w;
+        glUniform2f(scaleLocation, lengthX * aspect, thicknessX);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        // Вертикальная
+        float thicknessY = 4.0f / (float)h;
+        float lengthY = 30.0f / (float)h;
+        glUniform2f(scaleLocation, thicknessY * aspect, lengthY);
+        // рисуем всё двумя треугольниками
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
         // для блоков опять врубаем авточтение цветов и смещения
@@ -559,7 +503,6 @@ int main() {
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
-
     // Перед выходом:
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
@@ -573,9 +516,8 @@ int main() {
 
 // НА ПОТОМ:
 // Добавить руды и рандомную генерацию 
-// ставить блоки на переднем пкм, на заднем - с шифтом мб
 // 
-// добавить инвентарь
+// добавить инвентарь побольше, крафт
 // 
 // 
 // 
