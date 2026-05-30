@@ -4,7 +4,7 @@ set(PROJECT_NAME Minecraft2D)
 
 project(${PROJECT_NAME})
 
-add_executable(${PROJECT_NAME} src/main.cpp src/Config.h src/Physics.h src/World.h)
+add_executable(${PROJECT_NAME} src/main.cpp src/Config.cpp src/Config.h src/Physics.h src/World.h src/Graphics.h src/Graphics.cpp src/CallBackFunctions.h src/CallBackFunctions.cpp)
 
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)

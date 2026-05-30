@@ -6,156 +6,15 @@
 #include <cmath>
 #include <ctime>
 
+#include "Graphics.h"
+#include "CallBackFunctions.h"
 #include "Config.h"
 #include "World.h"
 #include "Physics.h"
 
-// Шейдеры
-const char* vertexShaderSource = "#version 460 core\n" // так. это - верся языка шейдеров...
-"layout (location = 0) in vec2 aPos;\n" // вершины блока
-"layout (location = 1) in vec2 instanceOffset;\n" // где блок находится
-"layout (location = 2) in vec3 instanceColor;\n"  // цвет для блока
-"out vec3 blockColor;\n" // что на выходе по цвету
-"uniform vec2 scale;\n" // ..по величине блока (это для всех )
-"uniform float aspect;\n" // пропорции экрана
-"void main() {\n"
-"   gl_Position = vec4((aPos.x * scale.x + instanceOffset.x) / aspect, aPos.y * scale.y + instanceOffset.y, 0.0, 1.0);\n" //ПОЛОЖЕНИЕ ТОЧКИ НА ЭКРАНЕ В ИТОГЕ
-"   blockColor = instanceColor;\n"
-"}\0";
-
-const char* fragmentShaderSource = "#version 460 core\n" // эта штука красит каждый пиксель
-"out vec4 FragColor;\n"
-"in vec3 blockColor;\n"
-"void main() {\n"
-"   FragColor = vec4(blockColor, 1.0f);\n"
-"}\n\0";
-
-// Для инвентаря (UI)
-float lastBorderScaleX = 0.0f;
-float lastStartUiX = 0.0f;
-float lastSlotStepX = 0.0f;
-float lastBorderScaleY = 0.0f;
-float lastUiY = -0.85f;
-
-
-// Технические штуки.
-// Изменене размеров окна
-void glfwWindowSizeCallback(GLFWwindow* window, int width, int height) {
-    glViewport(0, 0, width, height);
-}
-
-// Колёсико мыши для быстрой смены слотов инвентаря
-void glfwScrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
-    if (yoffset > 0) {
-        selectedSlot = (selectedSlot - 1 + 9) % 9;
-    }
-    else if (yoffset < 0) {
-        selectedSlot = (selectedSlot + 1) % 9;
-    }
-}
-
-// Клавиши (Esc и цифры 1-9)
-void glfwKeyCallback(GLFWwindow* window, int key, int scancode, int action, int mode) {
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-        glfwSetWindowShouldClose(window, GL_TRUE);
-    }
-    if (action == GLFW_PRESS && key >= GLFW_KEY_1 && key <= GLFW_KEY_9) {
-        selectedSlot = key - GLFW_KEY_1;
-    }
-}
-
-// ЛКМ для выбора ячейки инвентаря на экране
-void glfwMouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
-    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
-        double mouseX, mouseY;
-        glfwGetCursorPos(window, &mouseX, &mouseY);
-
-        int w, h;
-        glfwGetWindowSize(window, &w, &h);
-        float aspect = (float)w / (float)h;
-
-        // Переводим пиксельные координаты экрана в координаты от -1.0f до 1.0f
-        float ndcX = (2.0f * (float)mouseX) / (float)w - 1.0f;
-        float ndcY = 1.0f - (2.0f * (float)mouseY) / (float)h;
-
-        // Проверяем, попал ли клик по высоте инвентаря
-        float halfHeight = lastBorderScaleY / 2.0f;
-        if (ndcY >= (lastUiY - halfHeight) && ndcY <= (lastUiY + halfHeight)) {
-
-            // Проверяем каждый из 9 слотов
-            for (int i = 0; i < 9; i++) {
-                float slotCenterX = lastStartUiX + i * lastSlotStepX;
-
-                float leftEdge = (slotCenterX - (lastBorderScaleX / 2.0f)) / aspect;
-                float rightEdge = (slotCenterX + (lastBorderScaleX / 2.0f)) / aspect;
-
-                if (ndcX >= leftEdge && ndcX <= rightEdge) {
-                    selectedSlot = i; // Активируем выбранный слот
-                    return; // Выходим, чтобы клик не улетел в игровой мир
-                }
-            }
-        }
-    }
-}
-
-// Матрицы пиксельных цифр 3x5 для количества предметов
-const int font3x5[10][5] = {
-    {0b111, 0b101, 0b101, 0b101, 0b111}, // 0
-    {0b010, 0b110, 0b010, 0b010, 0b111}, // 1
-    {0b111, 0b001, 0b111, 0b100, 0b111}, // 2
-    {0b111, 0b001, 0b111, 0b001, 0b111}, // 3
-    {0b101, 0b101, 0b111, 0b001, 0b001}, // 4
-    {0b111, 0b100, 0b111, 0b001, 0b111}, // 5
-    {0b111, 0b100, 0b111, 0b101, 0b111}, // 6
-    {0b111, 0b001, 0b010, 0b010, 0b010}, // 7
-    {0b111, 0b101, 0b111, 0b101, 0b111}, // 8
-    {0b111, 0b101, 0b111, 0b001, 0b111}  // 9
-};
-
-// Рендеринг одной цифры шрифтом 3x5 (масштаб х3 пикселя)
-void drawPixelDigit(int digit, float startPixelX, float startPixelY, float pixelSizeX, float pixelSizeY, int scaleLoc, float aspect) {
-    if (digit < 0 || digit > 9) return;
-
-    glUniform2f(scaleLoc, pixelSizeX * 3.0f * aspect, pixelSizeY * 3.0f);
-    float whiteColor[] = { 1.0f, 1.0f, 1.0f };
-    glVertexAttrib3fv(2, whiteColor);
-
-    for (int row = 0; row < 5; row++) {
-        int rowBits = font3x5[digit][row];
-        for (int col = 0; col < 3; col++) {
-            if ((rowBits >> (2 - col)) & 1) {
-                float px = startPixelX + (col * 3.0f + 1.5f) * pixelSizeX * aspect;
-                float py = startPixelY - (row * 3.0f + 1.5f) * pixelSizeY;
-
-                float digitOffset[] = { px, py };
-                glVertexAttrib2fv(1, digitOffset);
-                glDrawArrays(GL_TRIANGLES, 0, 6);
-            }
-        }
-    }
-}
-
-// Рисует кол-во блоков в ячейке
-void drawPixelNumber(int number, float cellRightX, float cellBottomY, int screenW, int screenH, int scaleLoc, float aspect) {
-    float pixelSizeX = 2.0f / (float)screenW;
-    float pixelSizeY = 2.0f / (float)screenH;
-
-    float endX = cellRightX - 5.0f * pixelSizeX * aspect;
-    float startY = cellBottomY + 17.0f * pixelSizeY;
-
-    if (number >= 10) {
-        int d1 = number / 10;
-        int d2 = number % 10;
-        drawPixelDigit(d2, endX - 3.0f * pixelSizeX * 3.0f * aspect, startY, pixelSizeX, pixelSizeY, scaleLoc, aspect);
-        drawPixelDigit(d1, endX - 7.0f * pixelSizeX * 3.0f * aspect, startY, pixelSizeX, pixelSizeY, scaleLoc, aspect);
-    }
-    else {
-        drawPixelDigit(number, endX - 3.0f * pixelSizeX * 3.0f * aspect, startY, pixelSizeX, pixelSizeY, scaleLoc, aspect);
-    }
-}
-
 int main() {
-    srand((unsigned int)time(NULL));
+    // Мир теперь рандомный, а не тестовый, сид генерируется сам
+    srand((unsigned int)time(0));
     // Инициализация графического окна
     if (!glfwInit()) {
         std::cerr << "Can't load GLFW." << std::endl;
@@ -215,8 +74,7 @@ int main() {
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-
-    // это нам не объясняли. разберусь может быть потом. 
+ 
     unsigned int instanceOffsetsVBO, instanceColorsVBO;
     glGenBuffers(1, &instanceOffsetsVBO);
     glGenBuffers(1, &instanceColorsVBO);
@@ -303,12 +161,9 @@ int main() {
                     activeOffsets.push_back((y - cameraY) * sy);
 
                     // Базовый цвет блока
-                    float r = 0.0f, g = 0.0f, b = 0.0f;
-                    if (block == GRASS) { r = 0.2f;  g = 0.8f;  b = 0.2f; }
-                    else if (block == DIRT) { r = 0.45f;  g = 0.27f;  b = 0.08f; }
-                    else if (block == STONE) { r = 0.4f;  g = 0.4f;  b = 0.42f; }
-                    else if (block == WOOD) { r = 0.55f;  g = 0.37f; b = 0.15f; }
-                    else if (block == LEAVES) { r = 0.1f;  g = 0.5f;  b = 0.1f; }
+                    float r = getBlockColorR(block);
+                    float g = getBlockColorG(block);
+                    float b = getBlockColorB(block);
 
                     // Если это задний слой, смешиваем: 75% цвета блока + 25% цвета фона (неба)
                     if (layerIdx == 0) {
@@ -336,13 +191,9 @@ int main() {
             activeOffsets.push_back((renderY - cameraY) * sy);
 
             // цвет предмета
-            float r = 0.0f, g = 0.0f, b = 0.0f;
-            if (item.type == GRASS) { r = 0.2f; g = 0.8f; b = 0.2f; }
-            else if (item.type == DIRT) { r = 0.45f; g = 0.27f; b = 0.08f; }
-            else if (item.type == STONE) { r = 0.4f; g = 0.4f; b = 0.42f; }
-            else if (item.type == WOOD) { r = 0.55f; g = 0.37f; b = 0.15f; }
-            else if (item.type == LEAVES) { r = 0.1f; g = 0.5f; b = 0.1f; }
-            else if (item.type == APPLE) { r = 0.9f; g = 0.1f; b = 0.1f; }
+            float r = getBlockColorR(item.type); 
+            float g = getBlockColorG(item.type);
+            float b = getBlockColorB(item.type);
 
             activeColors.push_back(r);
             activeColors.push_back(g);
@@ -360,18 +211,35 @@ int main() {
             glBindBuffer(GL_ARRAY_BUFFER, instanceColorsVBO);
             glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(activeColors.size() * sizeof(float)), activeColors.data(), GL_STREAM_DRAW);
 
-            // Отрисовка blocks
+            // Отрисовка блоков
             if (blocksCountInVbo > 0) {
                 glUniform2f(scaleLocation, sx, sy);
                 glDrawArraysInstanced(GL_TRIANGLES, 0, 6, blocksCountInVbo);
             }
 
-            // Отрисовка выдавших предметов
+            // Отрисовка выпавших предметов
             if (!droppedItems.empty()) {
                 glUniform2f(scaleLocation, sx * 0.25f, sy * 0.25f);
                 glDrawArraysInstancedBaseInstance(GL_TRIANGLES, 0, 6, (GLsizei)droppedItems.size(), blocksCountInVbo);
             }
         }
+
+
+        // Отрисовка мобов
+        // Овечка
+        for (const auto& sheep : sheeps) {
+            glBindVertexArray(playerVAO);
+            float sheepOffset[] = { (sheep.x - cameraX) * sx, (sheep.y - cameraY) * sy };
+            float sheepColor[] = { 0.95f, 0.95f, 0.95f }; // Белая шерсть овечки
+
+            glUniform2f(scaleLocation, sx * sheep.width, sy * sheep.height);
+            glDisableVertexAttribArray(1);
+            glDisableVertexAttribArray(2);
+            glVertexAttrib2fv(1, sheepOffset);
+            glVertexAttrib3fv(2, sheepColor);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+
 
         // Рисуем игрока поверх заднего слоя блоков
         glBindVertexArray(playerVAO);
@@ -429,14 +297,10 @@ int main() {
             // Иконка предмета в слоте
             if (inventory[i].type != AIR) {
                 glUniform2f(scaleLocation, slotScaleX * 0.52f, slotScaleY * 0.52f);
-                float itemR = 0.0f, itemG = 0.0f, itemB = 0.0f;
                 int type = inventory[i].type;
-                if (type == GRASS) { itemR = 0.2f; itemG = 0.8f; itemB = 0.2f; }
-                else if (type == DIRT) { itemR = 0.45f; itemG = 0.27f; itemB = 0.08f; }
-                else if (type == STONE) { itemR = 0.4f; itemG = 0.4f; itemB = 0.42f; }
-                else if (type == WOOD) { itemR = 0.55f; itemG = 0.37f; itemB = 0.15f; }
-                else if (type == LEAVES) { itemR = 0.1f; itemG = 0.5f; itemB = 0.1f; }
-                else if (type == APPLE) { itemR = 0.9f; itemG = 0.1f; itemB = 0.1f; }
+                float itemR = getBlockColorR(inventory[i].type);
+                float itemG = getBlockColorG(inventory[i].type);
+                float itemB = getBlockColorB(inventory[i].type);
 
                 float itemColor[] = { itemR, itemG, itemB };
                 glVertexAttrib3fv(2, itemColor);
@@ -450,6 +314,171 @@ int main() {
                 }
             }
         }
+
+        // Крафт
+        craftBtnScaleX = slotSizePixels * (2.0f / (float)w) * aspect;
+        craftBtnScaleY = slotSizePixels * (2.0f / (float)h);
+        craftBtnCenterX = aspect - (craftBtnScaleX / 2.0f) - 0.05f * aspect;
+        craftBtnCenterY = 1.0f - (craftBtnScaleY / 2.0f) - 0.05f;
+
+        glUniform1f(aspectLocation, aspect);
+        glUniform2f(scaleLocation, craftBtnScaleX, craftBtnScaleY);
+        float craftBtnOffset[] = { craftBtnCenterX, craftBtnCenterY };
+        float craftBtnColor[] = { 0.55f, 0.55f, 0.55f }; // Цвет кнопки
+        if (isCraftingOpen) {
+            craftBtnColor[0] = 0.7f; craftBtnColor[1] = 0.7f; craftBtnColor[2] = 0.7f; // Подсветка активной кнопки
+        }
+        glVertexAttrib2fv(1, craftBtnOffset);
+        glVertexAttrib3fv(2, craftBtnColor);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        if (isCraftingOpen) {
+            // Размеры основного светло-серого окна меню
+            float menuW = 300.0f * (2.0f / (float)w) * aspect;
+            float menuH = 180.0f * (2.0f / (float)h);
+            float menuCenterX = craftBtnCenterX - menuW / 2.0f - 0.15f;
+            float menuCenterY = craftBtnCenterY - menuH / 2.0f + (craftBtnScaleY / 2.0f);
+
+            // Сохраняем размеры для мышки
+            lastMenuW = menuW; lastMenuH = menuH;
+            lastMenuCenterX = menuCenterX; lastMenuCenterY = menuCenterY;
+
+            // 1. Рисуем подложку
+            glUniform2f(scaleLocation, menuW, menuH);
+            float menuOffset[] = { menuCenterX, menuCenterY };
+            float menuBgColor[] = { 0.8f, 0.8f, 0.8f };
+            glVertexAttrib2fv(1, menuOffset);
+            glVertexAttrib3fv(2, menuBgColor);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+
+            // Размеры ячеек крафта
+            float craftSlotW = 44.0f * (2.0f / (float)w) * aspect;
+            float craftSlotH = 44.0f * (2.0f / (float)h);
+            float craftPaddingX = 6.0f * (2.0f / (float)w) * aspect;
+            float craftPaddingY = 6.0f * (2.0f / (float)h);
+
+            float gridStartX = menuCenterX - menuW / 4.0f;
+            float gridStartY = menuCenterY + craftSlotH / 2.0f + craftPaddingY / 2.0f;
+            float slotNormalColor[] = { 0.45f, 0.45f, 0.45f };
+
+            // Сохраняем это для мышки
+            lastCraftSlotW = craftSlotW; lastCraftSlotH = craftSlotH;
+            lastGridStartX = gridStartX; lastGridStartY = gridStartY;
+            lastCraftPaddingX = craftPaddingX; lastCraftPaddingY = craftPaddingY;
+
+            // 2. Рисуем 4 ячейки крафта и иконки в них
+            for (int row = 0; row < 2; row++) {
+                for (int col = 0; col < 2; col++) {
+                    float cx = gridStartX + col * (craftSlotW + craftPaddingX);
+                    float cy = gridStartY - row * (craftSlotH + craftPaddingY);
+
+                    // Сама ячейка
+                    glUniform2f(scaleLocation, craftSlotW, craftSlotH);
+                    float cOffset[] = { cx, cy };
+                    glVertexAttrib2fv(1, cOffset);
+                    glVertexAttrib3fv(2, slotNormalColor);
+                    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+                    // Предмет в ней
+                    if (craftGrid[row][col].type != AIR) {
+                        glUniform2f(scaleLocation, craftSlotW * 0.52f, craftSlotH * 0.52f);
+                        int type = craftGrid[row][col].type;
+                        float itemR = getBlockColorR(type);
+                        float itemG = getBlockColorG(type);
+                        float itemB = getBlockColorB(type);
+
+                        float itemColor[] = { itemR, itemG, itemB };
+                        glVertexAttrib3fv(2, itemColor);
+                        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+                        if (craftGrid[row][col].count > 1) {
+                            drawPixelNumber(craftGrid[row][col].count, cx + craftSlotW / 2.0f, cy - craftSlotH / 2.0f, w, h, scaleLocation, aspect);
+                        }
+                        glVertexAttrib2fv(1, cOffset);
+                    }
+                }
+            }
+
+            // 3. Рисуем тёмно-серую стрелочку
+            float arrowCenterX = gridStartX + 2 * (craftSlotW + craftPaddingX) + 5.0f * (2.0f / (float)w) * aspect;
+            float arrowCenterY = menuCenterY;
+            float arrowColor[] = { 0.3f, 0.3f, 0.3f };
+
+            float arrBodyW = 24.0f * (2.0f / (float)w) * aspect;
+            float arrBodyH = 8.0f * (2.0f / (float)h);
+            glUniform2f(scaleLocation, arrBodyW, arrBodyH);
+            float arrBodyOffset[] = { arrowCenterX, arrowCenterY };
+            glVertexAttrib2fv(1, arrBodyOffset);
+            glVertexAttrib3fv(2, arrowColor);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            
+
+            float arrTipW = 6.0f * (2.0f / (float)w) * aspect;
+            for (int i = 0; i < 3; i++) {
+                float arrTipH = (24.0f - i * 8.0f) * (2.0f / (float)h);
+                glUniform2f(scaleLocation, arrTipW, arrTipH);
+                float arrTipOffset[] = { arrowCenterX + arrBodyW / 2.0f + (i * arrTipW / 2.0f), arrowCenterY };
+                glVertexAttrib2fv(1, arrTipOffset);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+            }
+
+            // 4. Рисуем 5-ю ячейку результат и иконку в ней
+            float resultCenterX = arrowCenterX + arrBodyW + 25.0f * (2.0f / (float)w) * aspect;
+            float resultCenterY = menuCenterY;
+            lastResultCenterX = resultCenterX; lastResultCenterY = resultCenterY; // сохраняем
+
+            glUniform2f(scaleLocation, craftSlotW, craftSlotH);
+            float resOffset[] = { resultCenterX, resultCenterY };
+            glVertexAttrib2fv(1, resOffset);
+            glVertexAttrib3fv(2, slotNormalColor);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+
+            if (craftResult.type != AIR) {
+                glUniform2f(scaleLocation, craftSlotW * 0.52f, craftSlotH * 0.52f);
+                int type = craftResult.type;
+                float itemR = getBlockColorR(type); // или item.type для лута
+                float itemG = getBlockColorG(type);
+                float itemB = getBlockColorB(type);
+
+                float itemColor[] = { itemR, itemG, itemB };
+                glVertexAttrib3fv(2, itemColor);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+
+                if (craftResult.count > 1) {
+                    drawPixelNumber(craftResult.count, resultCenterX + craftSlotW / 2.0f, resultCenterY - craftSlotH / 2.0f, w, h, scaleLocation, aspect);
+                }
+            }
+        }
+
+        // Предмет в руке при перетаскивании
+        if (cursorSlot.type != AIR) {
+            float mouseNdcX = (2.0f * (float)currentMouseX) / (float)w - 1.0f;
+            float mouseNdcY = 1.0f - (2.0f * (float)currentMouseY) / (float)h;
+
+            // Подгоняем размер иконки (масштаб ячейки 56px * 0.52 для самого предмета)
+            float dragW = 56.0f * (2.0f / (float)w) * aspect * 0.52f;
+            float dragH = 56.0f * (2.0f / (float)h) * 0.52f;
+            glUniform2f(scaleLocation, dragW, dragH);
+
+            float dragOffset[] = { mouseNdcX * aspect, mouseNdcY };
+            glVertexAttrib2fv(1, dragOffset);
+
+            // Определяем цвет предмета в зависимости от типа в cursorSlot
+            int type = cursorSlot.type;
+            float itemR = getBlockColorR(type);
+            float itemG = getBlockColorG(type);
+            float itemB = getBlockColorB(type);
+
+            float itemColor[] = { itemR, itemG, itemB };
+            glVertexAttrib3fv(2, itemColor);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+
+            // Если предметов больше одного — выводим количество функцией цифр
+            if (cursorSlot.count > 1) {
+                drawPixelNumber(cursorSlot.count, mouseNdcX * aspect + dragW, mouseNdcY - dragH, w, h, scaleLocation, aspect);
+            }
+        }
+
 
         // Отрисовка крестика (временная наверн)=
         float normX = (2.0f * (float)currentMouseX) / w - 1.0f;
@@ -517,7 +546,7 @@ int main() {
 // НА ПОТОМ:
 // Добавить руды и рандомную генерацию 
 // 
-// добавить инвентарь побольше, крафт
+// добавить инвентарь побольше
 // 
 // 
 // 

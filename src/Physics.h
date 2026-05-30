@@ -5,16 +5,97 @@
 #include <algorithm>
 #include <vector>
 
-// Выделяем переменные из Config.h, чтобы линкер не ругался...
-std::vector<DroppedItem> droppedItems;
-InventorySlot inventory[9];
-int selectedSlot = 0;
-int worldMap[2][MAP_HEIGHT][MAP_WIDTH] = { 0 };
-Player player;
-float cameraX = 0.0f;
-float cameraY = 0.0f;
-bool mousePressedLastFrame = false;
-bool rmousePressedLastFrame = false;
+// Клики по ячейкам инвентаря
+void handleInventoryClick(int slotIndex, int button) {
+    if (slotIndex < 0 || slotIndex >= 9) return;
+    // Ссылка на ячейку, по которой кликнули
+    InventorySlot& cell = inventory[slotIndex];
+
+    // Случай 1: Под курсором ничего нет — берем предметы из инвентаря
+    if (cursorSlot.type == AIR) {
+        if (cell.type == AIR || cell.count <= 0) return; // Клик по пустому месту
+
+        if (button == GLFW_MOUSE_BUTTON_LEFT) {
+            // ЛКМ — забираем всё
+            cursorSlot = cell;
+            cell.type = AIR;
+            cell.count = 0;
+        }
+        else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+            // ПКМ — забираем половину (с округлением вверх)
+            int taken = (cell.count + 1) / 2;
+            int left = cell.count - taken;
+
+            cursorSlot.type = cell.type;
+            cursorSlot.count = taken;
+
+            if (left > 0) {
+                cell.count = left;
+            }
+            else {
+                cell.type = AIR;
+                cell.count = 0;
+            }
+        }
+    }
+    // Случай 2: Под курсором есть предмет — кладем его в инвентарь
+    else {
+        if (button == GLFW_MOUSE_BUTTON_LEFT) {
+            // ЛКМ — Пытаемся отдать всё из руки
+            if (cell.type == AIR) {
+                // В ячейке пусто — отдаем всё
+                cell = cursorSlot;
+                cursorSlot.type = AIR;
+                cursorSlot.count = 0;
+            }
+            else if (cell.type == cursorSlot.type) {
+                // Типы совпадают — складываем стак (макс 64)
+                int roomLeft = 64 - cell.count;
+                if (roomLeft > 0) {
+                    if (cursorSlot.count <= roomLeft) {
+                        cell.count += cursorSlot.count;
+                        cursorSlot.type = AIR;
+                        cursorSlot.count = 0;
+                    }
+                    else {
+                        cell.count = 64;
+                        cursorSlot.count -= roomLeft;
+                    }
+                }
+            }
+            else {
+                InventorySlot temp = cell;
+                cell = cursorSlot;
+                cursorSlot = temp;
+            }
+        }
+        else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+            // ПКМ — Опускаем только одну штуку
+            if (cell.type == AIR) {
+                // В ячейке пусто — создаем там 1 предмет
+                cell.type = cursorSlot.type;
+                cell.count = 1;
+                cursorSlot.count--;
+
+                if (cursorSlot.count <= 0) {
+                    cursorSlot.type = AIR;
+                }
+            }
+            else if (cell.type == cursorSlot.type) {
+                // Тип тот же — добавляем 1 штуку, если не превышен лимит в 64
+                if (cell.count < 64) {
+                    cell.count++;
+                    cursorSlot.count--;
+
+                    if (cursorSlot.count <= 0) {
+                        cursorSlot.type = AIR;
+                    }
+                }
+            }
+            // Если типы разные, то при клике ПКМ ничего не будет
+        }
+    }
+}
 
 void addItemToInventory(int type) {
     for (int i = 0; i < 9; i++) {
@@ -32,7 +113,7 @@ void addItemToInventory(int type) {
     }
 }
 
-// Функция для проверки: можно ли поставить блок в указанную точку
+// Функция можно ли поставить блок в указанную точку
 bool canPlaceBlock(int targetX, int targetY, int layerToPlace, bool& outBuildingUnderSelf) {
     if (targetX < 0 || targetX >= MAP_WIDTH || targetY < 0 || targetY >= MAP_HEIGHT) return false;
     if (layerToPlace < 0 || layerToPlace > 1) return false;
@@ -60,9 +141,8 @@ bool canPlaceBlock(int targetX, int targetY, int layerToPlace, bool& outBuilding
 
     outBuildingUnderSelf = false;
 
-    // Снарая стройка под себя
+
     if (std::abs(targetX - pGridX) <= 1 && targetY <= cellUnderFeetY) {
-        // Жесткая проверка индексов для затыкания ворнинга C6386
         if (targetBuildY >= 0 && targetBuildY < MAP_HEIGHT && pGridX >= 0 && pGridX < MAP_WIDTH) {
             if (worldMap[layerToPlace][targetBuildY][pGridX] == AIR) {
                 if (layerToPlace == 0 && worldMap[1][targetBuildY][pGridX] != AIR) {
@@ -112,7 +192,7 @@ bool canPlaceBlock(int targetX, int targetY, int layerToPlace, bool& outBuilding
         float bBottom = (float)targetY - 0.5f;
         float bTop = (float)targetY + 0.5f;
 
-        // Хитбокс чут помешне 
+        // Хитбокс чуть помешне 
         float tolerance = 0.02f;
         float pLeft = (predictedPlayerX - player.width / 2.0f) + tolerance;
         float pRight = (predictedPlayerX + player.width / 2.0f) - tolerance;
@@ -238,8 +318,8 @@ void updatePhysics(GLFWwindow* window, float dt, double mouseX, double mouseY) {
     float oldFootY = oldPlayerY - (player.height / 2.0f);
     int checkY = (int)std::floor(oldFootY + 0.5f);
 
-    // Сушаем область проверки под ногами на 0.05f с каждой стороны,
-    // чтобы игрок не считал стены под собой полом, когда трется об них вплотную
+    // Сушаем область проверки под ногами на 0.05f с каждой стороны, 
+    // чтобы не цеплять боковые стены
     int checkX1 = (int)std::floor(player.x - (player.width / 2.0f) + 0.05f + 0.5f);
     int checkX2 = (int)std::floor(player.x + (player.width / 2.0f) - 0.05f + 0.5f);
 
@@ -263,7 +343,6 @@ void updatePhysics(GLFWwindow* window, float dt, double mouseX, double mouseY) {
     float itemRadius = itemSize / 2.0f;
 
     for (auto it = droppedItems.begin(); it != droppedItems.end();) {
-        // Координаты хитбокса предмета по X
         int checkItemX1 = (int)std::floor((it->x - itemRadius + 0.01f) + 0.5f);
         int checkItemX2 = (int)std::floor((it->x + itemRadius - 0.01f) + 0.5f);
 
@@ -346,7 +425,7 @@ void updatePhysics(GLFWwindow* window, float dt, double mouseX, double mouseY) {
         }
     }
 
-    // Перевод координат мыши в нормальные
+    // Перевод координат мыши в мировые
     int w, h;
     glfwGetWindowSize(window, &w, &h);
     float aspect = (float)w / (float)h;
@@ -360,7 +439,7 @@ void updatePhysics(GLFWwindow* window, float dt, double mouseX, double mouseY) {
 
     // Обработка клика ЛКМ для разрушения блоков
     int mouseState = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
-    if (mouseState == GLFW_PRESS && !mousePressedLastFrame) {
+    if (mouseState == GLFW_PRESS && !mousePressedLastFrame && cursorSlot.type == AIR) {
         if (targetX >= 0 && targetX < MAP_WIDTH && targetY >= 0 && targetY < MAP_HEIGHT) {
 
             float maxBreakDistance = 5.0f;
@@ -425,9 +504,10 @@ void updatePhysics(GLFWwindow* window, float dt, double mouseX, double mouseY) {
                         worldMap[0][targetY][targetX] = AIR;
                         targetLayer = 0;
                     }
+
                     if (targetLayer != -1 && brokenType != AIR) {
-                        float randVelX = ((float)(rand() % 200 - 100) / 100.0f) * 0.05f;
-                        float randVelY = ((float)(rand() % 100) / 100.0f) * 0.04f + 0.03f;
+                        float randVelX = ((float)(rand() % 200 - 100) / 100.0f) * 0.04f;
+                        float randVelY = ((float)(rand() % 100) / 100.0f) * 0.04f + 0.05f;
 
                         DroppedItem newItem(brokenType, (float)targetX, (float)targetY);
                         newItem.velX = randVelX;
@@ -479,6 +559,103 @@ void updatePhysics(GLFWwindow* window, float dt, double mouseX, double mouseY) {
         }
     }
     rmousePressedLastFrame = (rmouseState == GLFW_PRESS);
+
+    // ИИ и физика мобов (пока только овечки)
+    for (auto& sheep : sheeps) {
+        float oldSheepY = sheep.y;
+
+        sheep.aiTimer -= dt;
+        if (sheep.aiTimer <= 0.0f) {
+            int roll = rand() % 8;
+            if (roll < 4) {
+                sheep.currentAction = 0; // 50% стоять 
+            }
+            else if (roll >= 4 && roll < 6) {
+                sheep.currentAction = 1; // 25% влево
+            }
+            else {
+                sheep.currentAction = 2; // 25% вправо
+            }
+            sheep.aiTimer = 1.0f + (float)(rand() % 500) / 100.0f;
+        }
+
+        if (sheep.currentAction == 1) {
+            sheep.velX = -PHYSICS_MOBS_WALK_SPEED;
+        }
+        else if (sheep.currentAction == 2) {
+            sheep.velX = PHYSICS_MOBS_WALK_SPEED;
+        }
+        else {
+            sheep.velX = 0.0f;
+        }
+
+        sheep.velY -= PHYSICS_GRAVITY * dtMultiplier;
+        sheep.y += sheep.velY * dtMultiplier;
+        sheep.x += sheep.velX * dtMultiplier;
+
+        if (sheep.y < 0.0f) {
+            sheep.y = MAP_HEIGHT - 5.0f;
+            sheep.velY = 0.0f;
+        }
+
+        float sCheckYFeet = sheep.y - sheep.height / 2.0f + 0.1f;
+        float sCheckYHead = sheep.y + sheep.height / 2.0f - 0.1f;
+        int sTileYFeet = (int)std::floor(sCheckYFeet + 0.5f);
+        int sTileYHead = (int)std::floor(sCheckYHead + 0.5f);
+
+        if (sheep.velX > 0) {
+            float rightEdge = sheep.x + sheep.width / 2.0f;
+            int tileX = (int)std::floor(rightEdge + 0.5f);
+            if (tileX >= 0 && tileX < MAP_WIDTH) {
+                bool wallFeet = (sTileYFeet >= 0 && sTileYFeet < MAP_HEIGHT) && (worldMap[1][sTileYFeet][tileX] != AIR);
+                bool wallHead = (sTileYHead >= 0 && sTileYHead < MAP_HEIGHT) && (worldMap[1][sTileYHead][tileX] != AIR);
+                if (wallFeet || wallHead) {
+                    sheep.x = (float)tileX - 0.5f - sheep.width / 2.0f;
+                    if (sheep.isOnGround) {
+                        sheep.velY = PHYSICS_JUMP_POWER * 0.87f;
+                        sheep.isOnGround = false;
+                    }
+                }
+            }
+        }
+        else if (sheep.velX < 0) {
+            float leftEdge = sheep.x - sheep.width / 2.0f;
+            int tileX = (int)std::floor(leftEdge + 0.5f);
+            if (tileX >= 0 && tileX < MAP_WIDTH) {
+                bool wallFeet = (sTileYFeet >= 0 && sTileYFeet < MAP_HEIGHT) && (worldMap[1][sTileYFeet][tileX] != AIR);
+                bool wallHead = (sTileYHead >= 0 && sTileYHead < MAP_HEIGHT) && (worldMap[1][sTileYHead][tileX] != AIR);
+                if (wallFeet || wallHead) {
+                    sheep.x = (float)tileX + 0.5f + sheep.width / 2.0f;
+                    if (sheep.isOnGround) {
+                        sheep.velY = PHYSICS_JUMP_POWER * 0.85f;
+                        sheep.isOnGround = false;
+                    }
+                }
+            }
+        }
+
+        sheep.isOnGround = false;
+        float sFootY = sheep.y - (sheep.height / 2.0f);
+        float sOldFootY = oldSheepY - (sheep.height / 2.0f);
+        int sCheckY = (int)std::floor(sOldFootY + 0.5f);
+
+        int sCheckX1 = (int)std::floor(sheep.x - (sheep.width / 2.0f) + 0.05f + 0.5f);
+        int sCheckX2 = (int)std::floor(sheep.x + (sheep.width / 2.0f) - 0.05f + 0.5f);
+
+        if (sCheckY >= 0 && sCheckY < MAP_HEIGHT) {
+            bool blockUnderLeft = (sCheckX1 >= 0 && sCheckX1 < MAP_WIDTH) && (worldMap[1][sCheckY][sCheckX1] != AIR);
+            bool blockUnderRight = (sCheckX2 >= 0 && sCheckX2 < MAP_WIDTH) && (worldMap[1][sCheckY][sCheckX2] != AIR);
+
+            if (blockUnderLeft || blockUnderRight) {
+                float blockTop = (float)sCheckY + 0.5f;
+                if (sFootY <= blockTop && sheep.velY <= 0) {
+                    sheep.y = blockTop + (sheep.height / 2.0f);
+                    sheep.velY = 0.0f;
+                    sheep.isOnGround = true;
+                }
+            }
+        }
+    }
 
     // Камера
     float cameraSmoothing = 1.0f - std::pow(0.1f, dt * 5.0f);
